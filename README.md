@@ -1,5 +1,25 @@
 # Condomino Mod
 
+Autonomous NPC colonies for Minetest.
+
+## Features
+- **Unique Names**: Each NPC gets a unique name from a predefined list.
+- **Colony Building**: NPCs build a plaza, houses, and a defensive wall.
+- **States**: Mining, Building, Sleeping, Defending.
+- **Player-like**: Uses the standard character model and moves like a player.
+
+## Usage
+1. Place `condomino:npc` (Yellow Wool block).
+2. The first NPC becomes the Leader.
+3. Subsequent NPCs join the colony until 10 members are reached.
+4. Once the wall is built, the colony is complete. New spawners start new colonies.
+
+## Dependencies
+- default
+- beds
+- stairs
+- wool# Condomino Mod
+
 An autonomous NPC colony simulator for Minetest/Luanti.
 
 ## Features
