@@ -1,5 +1,5 @@
 -- condomino/init.lua
--- Autonomous NPC Colony Mod for Minetest/Luanti
+-- Autonomous NPC Colony Mod for Luanti/Minetest
 
 condomino = {}
 condomino.colonies = {}
@@ -47,7 +47,6 @@ local REQUIRED_ITEMS = {
 	["default:torch_wall"] = 1
 }
 
--- 10 fixed house positions inside a 25x25 plaza
 local HOUSE_SLOTS = {
 	{x=-9, z=-9}, {x=-3, z=-9}, {x=3, z=-9}, {x=9, z=-9},
 	{x=-9, z=-3}, {x=-3, z=-3}, {x=3, z=-3}, {x=9, z=-3},
@@ -60,9 +59,7 @@ local HOUSE_SLOTS = {
 
 local function get_active_colony()
 	for id, c in pairs(condomino.colonies) do
-		if c.phase ~= "DONE" and #c.members < 10 then
-			return id
-		end
+		if c.phase ~= "DONE" and #c.members < 10 then return id end
 	end
 	return nil
 end
@@ -74,8 +71,8 @@ local function create_colony(center_pos)
 	condomino.colonies[id] = {
 		id = id,
 		center = c,
-		mine_pos = {x = c.x + 50, y = c.y, z = c.z},
-		phase = "MINE",      -- MINE -> PLAZA -> HOUSES -> WALL -> DONE
+		mine_pos = {x = c.x + 50, y = c.y + 1, z = c.z}, -- +1 Y to avoid underground/water
+		phase = "MINE",
 		plaza_done = false,
 		wall_done = false,
 		wall_step = 0,
@@ -99,12 +96,12 @@ minetest.register_entity("condomino:npc_entity", {
 		mesh = "character.b3d",
 		textures = {"character.png"},
 		stepheight = 1.1,
-		automatic_rotate = false,
+		automatic_rotate = 0, -- FIXED: Must be a number (0 = disabled)
 		nametag = "",
+		nametag_color = {a=255, r=255, g=255, b=255},
 		infotext = ""
 	},
 
-	-- Custom State
 	name = "",
 	colony_id = 0,
 	role = "FOLLOWER",
@@ -115,12 +112,12 @@ minetest.register_entity("condomino:npc_entity", {
 	schema_step = 0,
 	plaza_step = 0,
 	timer = 0,
-	task = "IDLE", -- IDLE, WALK, MINE, BUILD, SLEEP, DEFEND
+	task = "IDLE",
 	house_built = false,
 	yaw_dir = {x=0, z=0},
 
 	on_activate = function(self, staticdata, dtime)
-		self.object:set_acceleration({x=0, y=-9.8, z=0}) -- Gravity
+		self.object:set_acceleration({x=0, y=-9.8, z=0})
 		self.object:set_armor_groups({fleshy=100})
 		
 		if staticdata ~= "" then
@@ -163,15 +160,16 @@ minetest.register_entity("condomino:npc_entity", {
 		self.timer = self.timer + dtime
 		self.object:set_properties({infotext = self.action})
 
-		-- Sleep at night
+		-- Night sleep logic
 		local tod = minetest.get_timeofday()
 		if self.house_built and (tod < 0.25 or tod > 0.75) and col.phase ~= "MINE" then
 			if self.task ~= "SLEEP" then
 				self.task = "SLEEP"
 				self.action = "Sleeping"
 				self.object:set_velocity({x=0, y=0, z=0})
-				local bed_pos = {x=self.target.x+2, y=self.target.y, z=self.target.z+4}
-				self.object:set_pos(bed_pos)
+				if self.target then
+					self.object:set_pos({x=self.target.x+2, y=self.target.y, z=self.target.z+4})
+				end
 			end
 			return
 		end
@@ -180,7 +178,7 @@ minetest.register_entity("condomino:npc_entity", {
 			self.action = "Waking"
 		end
 
-		-- Main Logic Router
+		-- Task router
 		if self.task == "IDLE" then self:think(col)
 		elseif self.task == "WALK" then self:walk(col)
 		elseif self.task == "MINE" then self:mine(col)
@@ -194,11 +192,7 @@ minetest.register_entity("condomino:npc_entity", {
 		end
 	end,
 
-	-- -----------------------------------------------------------------------
-	-- THINKER: Decides next task based on colony phase
-	-- -----------------------------------------------------------------------
 	think = function(self, col)
-		-- 1. Mine Phase
 		if col.phase == "MINE" then
 			self.target = col.mine_pos
 			self.task = "WALK"
@@ -206,7 +200,6 @@ minetest.register_entity("condomino:npc_entity", {
 			return
 		end
 
-		-- 2. Plaza Phase (Leader only)
 		if col.phase == "PLAZA" and self.role == "LEADER" and not col.plaza_done then
 			self.task = "BUILD"
 			self.action = "Building plaza"
@@ -215,23 +208,20 @@ minetest.register_entity("condomino:npc_entity", {
 			return
 		end
 
-		-- 3. House Phase (All)
 		if col.phase == "HOUSES" and not self.house_built then
 			if self.slot_idx == 0 then self.slot_idx = #col.members end
-			self.target = {x = col.center.x + HOUSE_SLOTS[self.slot_idx].x, y = col.center.y, z = col.center.z + HOUSE_SLOTS[self.slot_idx].z}
+			local slot = HOUSE_SLOTS[self.slot_idx] or {x=-3, z=-3}
+			self.target = {x = col.center.x + slot.x, y = col.center.y, z = col.center.z + slot.z}
 			self.task = "BUILD"
 			self.action = "Building house"
 			self.object:set_velocity({x=0, y=0, z=0})
 			return
 		end
 
-		-- 4. Wall Phase (Leader only, after all houses done)
 		if col.phase == "HOUSES" and self.house_built then
 			local done = 0
 			for _, m in ipairs(col.members) do if m.house_built then done = done + 1 end end
-			if done >= #col.members then
-				col.phase = "WALL"
-			end
+			if done >= #col.members then col.phase = "WALL" end
 		end
 		if col.phase == "WALL" and self.role == "LEADER" and not col.wall_done then
 			self.task = "BUILD"
@@ -241,7 +231,6 @@ minetest.register_entity("condomino:npc_entity", {
 			return
 		end
 
-		-- 5. Done / Defend
 		if col.wall_done then col.phase = "DONE" end
 		if col.phase == "DONE" then
 			self.task = "DEFEND"
@@ -249,15 +238,11 @@ minetest.register_entity("condomino:npc_entity", {
 			return
 		end
 
-		-- Idle wait
 		self.task = "IDLE"
 		self.action = "Waiting"
 		self.object:set_velocity({x=0, y=0, z=0})
 	end,
 
-	-- -----------------------------------------------------------------------
-	-- MOVEMENT: Player-like walking physics
-	-- -----------------------------------------------------------------------
 	walk = function(self, col)
 		if not self.target then self.task = "IDLE"; return end
 		local pos = self.object:get_pos()
@@ -266,7 +251,7 @@ minetest.register_entity("condomino:npc_entity", {
 		if dist < 1.5 then
 			if col.phase == "MINE" then
 				self.task = "MINE"
-				self.action = "Mining"
+				self.action = "Mining & Gathering"
 			else
 				self.task = "IDLE"
 			end
@@ -274,39 +259,34 @@ minetest.register_entity("condomino:npc_entity", {
 			return
 		end
 		
-		-- Smooth direction & yaw
+		-- Smooth player-like movement
 		local dir = vector.normalize(vector.subtract(self.target, pos))
-		self.yaw_dir.x = self.yaw_dir.x * 0.85 + dir.x * 0.15
-		self.yaw_dir.z = self.yaw_dir.z * 0.85 + dir.z * 0.15
+		self.yaw_dir.x = self.yaw_dir.x * 0.8 + dir.x * 0.2
+		self.yaw_dir.z = self.yaw_dir.z * 0.8 + dir.z * 0.2
 		self.object:set_yaw(math.atan2(self.yaw_dir.z, self.yaw_dir.x) + math.pi/2)
 		
 		local vel = self.object:get_velocity()
-		local speed = 2.5
-		local new_vel = {x = self.yaw_dir.x * speed, y = math.max(vel.y, -8), z = self.yaw_dir.z * speed}
+		local speed = 2.4
+		local new_vel = {x = self.yaw_dir.x * speed, y = math.max(vel.y, -10), z = self.yaw_dir.z * speed}
 		
-		-- Jump if blocked
-		local ahead = {x = pos.x + dir.x*0.8, y = pos.y + 0.5, z = pos.z + dir.z*0.8}
-		if minetest.get_node(ahead).name ~= "air" then new_vel.y = 5 end
+		-- Auto-jump if hitting a block ahead
+		local ahead = {x = pos.x + dir.x*0.7, y = pos.y + 0.6, z = pos.z + dir.z*0.7}
+		if minetest.get_node(ahead).name ~= "air" then new_vel.y = 5.5 end
 		
 		self.object:set_velocity(new_vel)
 	end,
 
-	-- -----------------------------------------------------------------------
-	-- TASKS
-	-- -----------------------------------------------------------------------
 	mine = function(self, col)
 		self.object:set_velocity({x=0, y=0, z=0})
 		if self.timer < 1.0 then return end
 		self.timer = 0
 		
-		-- Gather
 		local r = math.random(1,4)
 		if r==1 then self.inventory["default:stone"] = (self.inventory["default:stone"] or 0) + 1
 		elseif r==2 then self.inventory["default:dirt"] = (self.inventory["default:dirt"] or 0) + 1
 		elseif r==3 then self.inventory["default:sand"] = (self.inventory["default:sand"] or 0) + 1
 		else self.inventory["default:tree"] = (self.inventory["default:tree"] or 0) + 1 end
 		
-		-- Craft simulation
 		if (self.inventory["default:sand"] or 0) > 0 and (self.inventory["default:glass"] or 0) < 12 then
 			self.inventory["default:sand"] = self.inventory["default:sand"] - 1
 			self.inventory["default:glass"] = (self.inventory["default:glass"] or 0) + 1
@@ -316,7 +296,6 @@ minetest.register_entity("condomino:npc_entity", {
 			self.inventory["stairs:slab_glass"] = (self.inventory["stairs:slab_glass"] or 0) + 1
 		end
 		
-		-- Check readiness
 		if self:has_materials() then
 			if self.role == "LEADER" then
 				col.phase = "PLAZA"
@@ -335,7 +314,7 @@ minetest.register_entity("condomino:npc_entity", {
 		if self.timer < 0.12 then return end
 		self.timer = 0
 		
-		if self.plaza_step < 625 then -- 25x25
+		if self.plaza_step < 625 then
 			local x = (self.plaza_step % 25) - 12
 			local z = math.floor(self.plaza_step / 25) - 12
 			local p = {x = col.center.x + x, y = col.center.y - 1, z = col.center.z + z}
@@ -404,17 +383,11 @@ minetest.register_entity("condomino:npc_entity", {
 			local layer = math.floor(col.wall_step / perimeter) + 1
 			local seg = col.wall_step % perimeter
 			local p
-			if seg < w then
-				p = {x = b.min_x + seg, y = b.y + layer, z = b.min_z}
-			elseif seg < w + d then
-				p = {x = b.max_x, y = b.y + layer, z = b.min_z + (seg - w)}
-			elseif seg < 2*w + d then
-				p = {x = b.max_x - (seg - w - d), y = b.y + layer, z = b.max_z}
-			else
-				p = {x = b.min_x, y = b.y + layer, z = b.max_z - (seg - 2*w - d)}
-			end
+			if seg < w then p = {x = b.min_x + seg, y = b.y + layer, z = b.min_z}
+			elseif seg < w + d then p = {x = b.max_x, y = b.y + layer, z = b.min_z + (seg - w)}
+			elseif seg < 2*w + d then p = {x = b.max_x - (seg - w - d), y = b.y + layer, z = b.max_z}
+			else p = {x = b.min_x, y = b.y + layer, z = b.max_z - (seg - 2*w - d)} end
 			
-			-- Gate: 2 blocks wide, front center, ground layer
 			local is_gate = (layer == 1 and p.z == b.min_z and math.abs(p.x - (b.min_x + w/2)) < 1.5)
 			if not is_gate then minetest.set_node(p, {name = "default:stone"}) end
 			col.wall_step = col.wall_step + 1
@@ -429,7 +402,6 @@ minetest.register_entity("condomino:npc_entity", {
 		local pos = self.object:get_pos()
 		local b = {min_x=col.center.x-14, max_x=col.center.x+14, min_z=col.center.z-14, max_z=col.center.z+14}
 		
-		-- Patrol
 		if self.timer > 4.0 then
 			self.timer = 0
 			self._patrol = {x = math.random(b.min_x, b.max_x), y = b.y + 1, z = math.random(b.min_z, b.max_z)}
@@ -442,7 +414,6 @@ minetest.register_entity("condomino:npc_entity", {
 			self.object:set_velocity({x = dir.x * 1.8, y = math.max(vel.y, -6), z = dir.z * 1.8})
 		end
 		
-		-- Attack
 		for _, obj in ipairs(minetest.get_objects_inside_radius(pos, 5)) do
 			if obj:is_player() or (obj:get_luaentity() and obj:get_luaentity().type ~= "condomino:npc_entity") then
 				self.action = "Defending!"
@@ -454,7 +425,6 @@ minetest.register_entity("condomino:npc_entity", {
 		end
 	end,
 
-	-- Helper
 	has_materials = function(self)
 		for mat, cnt in pairs(REQUIRED_ITEMS) do
 			if (self.inventory[mat] or 0) < cnt then return false end
@@ -489,7 +459,6 @@ minetest.register_node("condomino:npc", {
 			return itemstack
 		end
 		
-		-- Assign unique name
 		local name = "Villager"
 		for _, n in ipairs(NAMES) do
 			if not condomino.used_names[n] then
