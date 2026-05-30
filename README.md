@@ -1,58 +1,28 @@
-# Condomino Mod
+# Condomino Mod v2.0
 
-Autonomous NPC colonies for Minetest.
+Fixed autonomous NPC colonies for Minetest.
 
-## Features
-- **Unique Names**: Each NPC gets a unique name from a predefined list.
-- **Colony Building**: NPCs build a plaza, houses, and a defensive wall.
-- **States**: Mining, Building, Sleeping, Defending.
-- **Player-like**: Uses the standard character model and moves like a player.
+## Fixes Applied
+- ✅ Unique names for each NPC (no duplicates)
+- ✅ Proper gravity/movement (no flying)
+- ✅ All NPCs build houses (fixed plot assignment)
+- ✅ Mining actually required before building
+- ✅ Wall builds after ALL houses are done
+- ✅ State synchronization between colony members
 
-## Usage
-1. Place `condomino:npc` (Yellow Wool block).
-2. The first NPC becomes the Leader.
-3. Subsequent NPCs join the colony until 10 members are reached.
-4. Once the wall is built, the colony is complete. New spawners start new colonies.
+## How It Works
+1. Place `condomino:npc` (yellow wool block)
+2. First NPC = Leader → builds 5×5 stone plaza at spawn
+3. Other NPCs = Followers → mine 50 blocks away for materials
+4. When plaza done + materials gathered → each builds their house
+5. When ALL houses done → colony builds defensive stone wall
+6. Wall complete → NPCs defend against intruders
+7. Night time → NPCs sleep in their beds
 
-## Dependencies
-- default
-- beds
-- stairs
-- wool# Condomino Mod
-
-An autonomous NPC colony simulator for Minetest/Luanti.
-
-## Features
-- **Autonomous NPCs**: Spawn NPCs that look like players and act independently.
-- **Colony Building**: NPCs work together to build a village.
-  - **Leader**: Builds a central stone plaza.
-  - **Followers**: Mine resources and build individual houses.
-  - **Defense**: Once houses are complete, the colony builds a defensive stone wall.
-- **Resource Gathering**: NPCs travel to a mine site (50 blocks away) to gather stone, dirt, and sand.
-- **Day/Night Cycle**: NPCs sleep in their beds at night.
-- **Defense Mode**: After the wall is built, NPCs defend the colony against intruders.
-
-## Usage
-1. Craft or obtain the `condomino:npc` block (Yellow Wool appearance).
-2. Place the block in the world.
-3. An NPC will spawn.
-   - The first NPC becomes the **Leader** and starts building the plaza.
-   - Subsequent NPCs become **Followers** and assist in mining and building houses.
-4. Watch them build their village!
-
-## Mechanics
-- **Names**: NPCs are assigned unique Spanish names from a predefined list.
-- **Limit**: Each colony supports up to 10 NPCs.
-- **New Colonies**: Once a colony finishes its wall, the next spawner placed will start a new, independent colony.
-- **Interaction**: You cannot interact with NPCs directly. Hover over them to see their current action. They can be killed.
+## Limits
+- Max 10 NPCs per colony
+- When wall is finished, next spawner starts NEW colony
+- Names are unique globally (no repeats ever)
 
 ## Dependencies
-- `default`
-- `beds`
-- `stairs`
-- `wool`
-
-## Technical Notes
-- No external textures are used; it relies on standard game assets.
-- AI is deterministic and state-based (Mine -> Craft -> Build -> Defend).
-- Pathfinding is basic (direct movement with simple jump/obstacle handling).
+`default`, `beds`, `stairs`, `wool` (all from Minetest Game)
