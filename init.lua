@@ -1,11 +1,7 @@
 condomino = {}
 condomino.colonies = {}
 condomino.next_colony_id = 1
-condomino.used_names = {} -- Global tracker for unique names
-
--- --------------------------------------------------------------------------
--- Data
--- --------------------------------------------------------------------------
+condomino.used_names = {}
 
 local NAMES = {
     "Matías", "Sebastián", "Mateo", "Nicolás", "Alejandro", "Samuel", "Diego", "Daniel", "Benjamín", "Leonardo",
@@ -35,9 +31,15 @@ local HOUSE_SCHEMA = {
     {y=2,param1=143,param2=3,z=2,name="stairs:slab_glass",x=4}, {y=2,param1=159,param2=3,z=3,name="stairs:slab_glass",x=4}, {y=2,param1=143,z=4,name="stairs:slab_glass",x=4}, {y=2,param1=127,param2=2,z=5,name="stairs:slab_glass",x=4}
 }
 
--- --------------------------------------------------------------------------
--- Helpers
--- --------------------------------------------------------------------------
+-- Material requirements per house (simplified)
+local HOUSE_MATERIALS = {
+    ["default:dirt"] = 20,
+    ["stairs:slab_glass"] = 12,
+    ["default:chest"] = 1,
+    ["beds:bed_top"] = 1,
+    ["beds:bed_bottom"] = 1,
+    ["default:torch_wall"] = 1
+}
 
 function condomino.get_unique_name()
     for _, name in ipairs(NAMES) do
@@ -49,83 +51,54 @@ function condomino.get_unique_name()
     return "Villager"
 end
 
-function condomino.distance(pos1, pos2)
-    return vector.distance(pos1, pos2)
-end
-
--- --------------------------------------------------------------------------
--- Colony Logic
--- --------------------------------------------------------------------------
-
 function condomino.create_colony(center_pos)
     local id = condomino.next_colony_id
     condomino.next_colony_id = condomino.next_colony_id + 1
-    
     condomino.colonies[id] = {
         id = id,
-        center = center_pos,
-        mine_pos = vector.add(center_pos, {x=50, y=0, z=0}),
-        state = "INIT", 
+        center = vector.round(center_pos),
+        mine_pos = vector.add(vector.round(center_pos), {x=50, y=0, z=0}),
+        state = "PLAZA",
         members = {},
-        houses_built = 0,
-        plaza_built = false,
-        wall_built = false,
+        plaza_done = false,
+        houses_done = 0,
+        wall_done = false,
         wall_bounds = nil,
-        wall_progress = 0
+        wall_idx = 0
     }
     return id
 end
-
-function condomino.get_active_colony()
-    for id, col in pairs(condomino.colonies) do
-        if col.state ~= "DEFEND" and #col.members < 10 then
-            return id
-        end
-    end
-    return nil
-end
-
--- --------------------------------------------------------------------------
--- Entity
--- --------------------------------------------------------------------------
 
 minetest.register_entity("condomino:npc_entity", {
     initial_properties = {
         hp_max = 20,
         physical = true,
         collide_with_objects = true,
-        collisionbox = {-0.3, -0.5, -0.3, 0.3, 1.7, 0.3},
+        collisionbox = {-0.3, 0, -0.3, 0.3, 1.7, 0.3},
         visual = "mesh",
         mesh = "character.b3d",
         textures = {"character.png"},
         stepheight = 1.1,
+        automatic_rotate = false,
         nametag = "",
     },
 
-    name = "",
-    colony_id = 0,
-    role = "FOLLOWER",
-    state = "IDLE",
-    inventory = {},
-    target_pos = nil,
-    timer = 0,
-    current_action = "Spawning",
-    house_pos = nil,
-    schema_idx = 1,
-    build_idx = 1,
-    
-    on_activate = function(self, staticdata, dtime_s)
-        if staticdata and staticdata ~= "" then
-            local data = minetest.deserialize(staticdata)
-            if data then
-                self.name = data.name
-                self.colony_id = data.colony_id
-                self.role = data.role
-                self.inventory = data.inventory or {}
-                self.state = data.state or "IDLE"
-                self.house_pos = data.house_pos
-                self.schema_idx = data.schema_idx or 1
-                self.build_idx = data.build_idx or 1
+    on_activate = function(self, staticdata, dtime)
+        self.object:set_acceleration({x=0, y=-9.8, z=0}) -- Gravity!
+        self.object:set_armor_groups({fleshy=100})
+        
+        if staticdata ~= "" then
+            local d = minetest.deserialize(staticdata)
+            if d then
+                self.name = d.name
+                self.colony_id = d.colony_id
+                self.role = d.role
+                self.plot_idx = d.plot_idx
+                self.inventory = d.inventory or {}
+                self.state = d.state or "IDLE"
+                self.target = d.target
+                self.schema_i = d.schema_i or 1
+                self.plaza_i = d.plaza_i or 1
             end
         end
         
@@ -134,358 +107,331 @@ minetest.register_entity("condomino:npc_entity", {
         end
         
         local col = condomino.colonies[self.colony_id]
-        if col then
-            table.insert(col.members, self)
-        end
-        
-        self.object:set_armor_groups({fleshy=100})
+        if col then table.insert(col.members, self) end
     end,
 
     get_staticdata = function(self)
         return minetest.serialize({
-            name = self.name,
-            colony_id = self.colony_id,
-            role = self.role,
-            inventory = self.inventory,
-            state = self.state,
-            house_pos = self.house_pos,
-            schema_idx = self.schema_idx,
-            build_idx = self.build_idx
+            name = self.name, colony_id = self.colony_id, role = self.role,
+            plot_idx = self.plot_idx, inventory = self.inventory,
+            state = self.state, target = self.target,
+            schema_i = self.schema_i, plaza_i = self.plaza_i
         })
     end,
 
     on_step = function(self, dtime)
-        self.timer = self.timer + dtime
-        
-        local pos = self.object:get_pos()
+        if not self.colony_id then return end
         local col = condomino.colonies[self.colony_id]
-        
         if not col then return end
-
-        -- Update Tooltip
-        self.object:set_nametag_attributes({text = self.name .. "\n" .. self.current_action})
-
-        -- State Machine
-        if self.state == "IDLE" then
-            self:determine_next_task(col)
-            
-        elseif self.state == "MOVING" then
-            self:handle_movement(dtime, pos)
-            
-        elseif self.state == "MINING" then
-            self:handle_mining(dtime, pos, col)
-            
-        elseif self.state == "BUILDING_PLAZA" then
-            self:handle_build_plaza(dtime, pos, col)
-            
-        elseif self.state == "BUILDING_HOUSE" then
-            self:handle_build_house(dtime, pos, col)
-            
-        elseif self.state == "BUILDING_WALL" then
-            self:handle_build_wall(dtime, pos, col)
-            
-        elseif self.state == "DEFEND" then
-            self:handle_defend(dtime, pos, col)
-            
-        elseif self.state == "SLEEPING" then
-            local time = minetest.get_timeofday()
-            if time > 0.2 and time < 0.8 then
-                self.state = "IDLE"
-                self.current_action = "Waking up"
+        
+        self._timer = (self._timer or 0) + dtime
+        self.object:set_nametag_attributes({text = self.name.."\n"..(self.action or "Idle")})
+        
+        -- Sleep at night
+        local tod = minetest.get_timeofday()
+        if self.house_built and (tod < 0.25 or tod > 0.75) and col.state ~= "PLAZA" then
+            if self.state ~= "SLEEP" then
+                self.state = "SLEEP"
+                self.action = "Sleeping"
+                self.object:set_velocity({x=0,y=0,z=0})
             end
+            return
+        end
+        if self.state == "SLEEP" and tod >= 0.25 and tod <= 0.75 then
+            self.state = "IDLE"
+            self.action = "Waking"
+        end
+        
+        -- State machine
+        if self.state == "IDLE" then self:think(col)
+        elseif self.state == "MOVE" then self:move_to(col)
+        elseif self.state == "MINE" then self:mine(col)
+        elseif self.state == "PLAZA" then self:build_plaza(col)
+        elseif self.state == "HOUSE" then self:build_house(col)
+        elseif self.state == "WALL" then self:build_wall(col)
+        elseif self.state == "DEFEND" then self:defend(col)
         end
     end,
 
-    determine_next_task = function(self, col)
-        local time = minetest.get_timeofday()
-        -- Sleep logic
-        if (time > 0.8 or time < 0.2) and self.house_pos and col.state ~= "INIT" then
-            self.state = "SLEEPING"
-            self.current_action = "Sleeping"
-            local bed_pos = {x=self.house_pos.x+2, y=self.house_pos.y, z=self.house_pos.z+4}
-            self.object:set_pos(bed_pos)
+    think = function(self, col)
+        -- Leader builds plaza first
+        if self.role == "LEADER" and col.state == "PLAZA" and not col.plaza_done then
+            self.state = "PLAZA"
+            self.action = "Building plaza"
+            self.object:set_pos(col.center)
+            return
+        end
+        
+        -- Everyone mines if plaza not done (followers) or if lacking materials
+        if not col.plaza_done and self.role ~= "LEADER" then
+            self.state = "MOVE"
+            self.target = col.mine_pos
+            self.action = "Going to mine"
+            return
+        end
+        
+        -- Check materials for house
+        if col.plaza_done and not self.house_built then
+            local need = false
+            for mat, cnt in pairs(HOUSE_MATERIALS) do
+                if (self.inventory[mat] or 0) < cnt then need = true break end
+            end
+            if need then
+                self.state = "MOVE"
+                self.target = col.mine_pos
+                self.action = "Getting materials"
+                return
+            end
+            -- Assign plot ONCE when ready to build
+            if not self.plot_idx then
+                self.plot_idx = #col.members  -- Fixed index at assignment time
+            end
+            self.state = "HOUSE"
+            self.action = "Building house"
             self.object:set_velocity({x=0,y=0,z=0})
             return
         end
-
-        if col.state == "INIT" or col.state == "PLAZA" then
-            if self.role == "LEADER" then
-                if not col.plaza_built then
-                    self.state = "MOVING"
-                    self.target_pos = col.center
-                    self.current_action = "Building Plaza"
-                else
-                    self.state = "BUILDING_HOUSE"
-                    self.current_action = "Building House"
-                end
-            else
-                if not col.mine_pos then
-                     col.mine_pos = vector.add(col.center, {x=50, y=0, z=0})
-                end
-                self.state = "MOVING"
-                self.target_pos = col.mine_pos
-                self.current_action = "Going to Mine"
+        
+        -- Wall phase
+        if self.house_built and col.plaza_done and not col.wall_done then
+            -- Count done houses
+            local done = 0
+            for _, m in ipairs(col.members) do if m.house_built then done = done + 1 end end
+            if done >= #col.members then
+                col.state = "WALL"
+                col.wall_bounds = self:calc_wall_bounds(col)
             end
-            
-        elseif col.state == "BUILDING" then
-            if not self.house_built then
-                self.state = "BUILDING_HOUSE"
-                self.current_action = "Building House"
-            else
-                if col.houses_built >= #col.members then
-                    col.state = "WALL"
-                end
-                self.state = "IDLE" 
-                self.current_action = "Waiting"
-            end
-            
-        elseif col.state == "WALL" then
-             if not col.wall_built then
-                 self.state = "BUILDING_WALL"
-                 self.current_action = "Building Wall"
-             else
-                 col.state = "DEFEND"
-                 self.state = "DEFEND"
-                 self.current_action = "Defending"
-             end
-             
-        elseif col.state == "DEFEND" then
+        end
+        
+        if col.state == "WALL" and not col.wall_done then
+            self.state = "WALL"
+            self.action = "Building wall"
+            return
+        end
+        
+        -- Defend
+        if col.wall_done then
             self.state = "DEFEND"
-            self.current_action = "Patrolling"
-        end
-    end,
-
-    handle_movement = function(self, dtime, pos)
-        if not self.target_pos then
-            self.state = "IDLE"
+            self.action = "Patrolling"
             return
         end
         
-        local dist = condomino.distance(pos, self.target_pos)
-        if dist < 1.5 then
-            self.state = "IDLE"
+        -- Idle wait
+        self.action = "Waiting"
+        self.object:set_velocity({x=0,y=0,z=0})
+    end,
+
+    move_to = function(self, col)
+        if not self.target then self.state = "IDLE"; return end
+        local pos = self.object:get_pos()
+        local dist = vector.distance(pos, self.target)
+        
+        if dist < 2 then
+            if self.state == "MOVE" and self.target == col.mine_pos then
+                self.state = "MINE"
+                self.action = "Mining"
+            else
+                self.state = "IDLE"
+            end
             self.object:set_velocity({x=0,y=0,z=0})
             return
         end
         
-        local dir = vector.normalize(vector.subtract(self.target_pos, pos))
-        local vel = {x=dir.x*2, y=0, z=dir.z*2}
-        
-        -- Simple jump
-        local node_below = minetest.get_node({x=pos.x, y=pos.y-1, z=pos.z}).name
-        if node_below == "air" then
-             vel.y = -5
-        elseif minetest.get_node({x=pos.x+dir.x, y=pos.y, z=pos.z+dir.z}).name ~= "air" then
-             vel.y = 3
-        end
-        
-        self.object:set_velocity(vel)
+        local dir = vector.normalize(vector.subtract(self.target, pos))
+        -- Move on XZ plane, let gravity handle Y
+        local vel = self.object:get_velocity()
+        self.object:set_velocity({x=dir.x*2.5, y=vel.y, z=dir.z*2.5})
+        -- Face direction
         local yaw = math.atan2(dir.z, dir.x) + math.pi/2
         self.object:set_yaw(yaw)
     end,
 
-    handle_mining = function(self, dtime, pos, col)
-        if condomino.distance(pos, col.mine_pos) > 5 then
-            self.state = "MOVING"
-            self.target_pos = col.mine_pos
-            return
+    mine = function(self, col)
+        self.object:set_velocity({x=0,y=0,z=0})
+        if self._timer < 1.5 then return end
+        self._timer = 0
+        
+        -- Add random materials
+        local mats = {"default:stone", "default:dirt", "default:sand", "default:tree"}
+        local got = mats[math.random(#mats)]
+        self.inventory[got] = (self.inventory[got] or 0) + 1
+        
+        -- Simple crafting simulation
+        if got == "default:sand" and (self.inventory["default:glass"] or 0) < 12 then
+            self.inventory["default:sand"] = self.inventory["default:sand"] - 1
+            self.inventory["default:glass"] = (self.inventory["default:glass"] or 0) + 1
+        end
+        if self.inventory["default:glass"] and (self.inventory["stairs:slab_glass"] or 0) < 12 then
+            self.inventory["default:glass"] = self.inventory["default:glass"] - 1
+            self.inventory["stairs:slab_glass"] = (self.inventory["stairs:slab_glass"] or 0) + 1
         end
         
-        self.current_action = "Mining"
-        self.object:set_velocity({x=0,y=0,z=0})
-        
-        if self.timer > 2 then
-            self.timer = 0
-            local r = math.random(1,3)
-            if r==1 then self:add_item("default:stone")
-            elseif r==2 then self:add_item("default:dirt")
-            else self:add_item("default:sand")
-            end
-            
-            -- Followers return to build phase after some mining
-            if self.role ~= "LEADER" and col.plaza_built then
-                 self.state = "IDLE"
-            end
+        -- Check if we have enough
+        local ready = true
+        for mat, cnt in pairs(HOUSE_MATERIALS) do
+            if (self.inventory[mat] or 0) < cnt then ready = false break end
+        end
+        if ready and col.plaza_done then
+            self.state = "IDLE"
+            self.action = "Got materials"
         end
     end,
 
-    handle_build_plaza = function(self, dtime, pos, col)
-        if self.role ~= "LEADER" then self.state = "IDLE"; return end
-        
-        self.current_action = "Building Plaza"
+    build_plaza = function(self, col)
         self.object:set_velocity({x=0,y=0,z=0})
+        if self._timer < 0.3 then return end
+        self._timer = 0
         
-        if self.timer > 0.2 then
-            self.timer = 0
-            
-            if not self.build_idx then self.build_idx = 1 end
-            
-            local c = col.center
-            local x_off = ((self.build_idx-1) % 5) - 2
-            local z_off = (math.floor((self.build_idx-1) / 5)) - 2
-            
-            if self.build_idx <= 25 then
-                local p = {x=c.x+x_off, y=c.y-1, z=c.z+z_off}
-                minetest.set_node(p, {name="default:stone"})
-                minetest.set_node({x=p.x, y=p.y+1, z=p.z}, {name="air"})
-                minetest.set_node({x=p.x, y=p.y+2, z=p.z}, {name="air"})
-                self.build_idx = self.build_idx + 1
-            else
-                col.plaza_built = true
-                col.state = "BUILDING"
-                self.state = "IDLE"
-                self.build_idx = nil
-            end
+        if self.plaza_i <= 25 then
+            local x_off = ((self.plaza_i-1) % 5) - 2
+            local z_off = math.floor((self.plaza_i-1) / 5) - 2
+            local p = {x=col.center.x+x_off, y=col.center.y-1, z=col.center.z+z_off}
+            minetest.set_node(p, {name="default:stone"})
+            minetest.set_node({x=p.x,y=p.y+1,z=p.z}, {name="air"})
+            minetest.set_node({x=p.x,y=p.y+2,z=p.z}, {name="air"})
+            self.plaza_i = self.plaza_i + 1
+        else
+            col.plaza_done = true
+            col.state = "BUILD"
+            self.state = "IDLE"
+            self.action = "Plaza done"
+            self.plaza_i = 1
         end
     end,
 
-    handle_build_house = function(self, dtime, pos, col)
-        self.current_action = "Building House"
+    build_house = function(self, col)
         self.object:set_velocity({x=0,y=0,z=0})
+        if not self.plot_idx then self.plot_idx = 1 end
         
-        if not self.house_pos then
-            local idx = #col.members
-            local side = math.floor((idx-1) / 4)
-            local pos_in_side = (idx-1) % 4
-            local offset = 4 + (pos_in_side * 6)
-            
-            if side == 0 then self.house_pos = vector.add(col.center, {x=offset, y=0, z=0})
-            elseif side == 1 then self.house_pos = vector.add(col.center, {x=-offset, y=0, z=0})
-            elseif side == 2 then self.house_pos = vector.add(col.center, {x=0, y=0, z=offset})
-            else self.house_pos = vector.add(col.center, {x=0, y=0, z=-offset})
-            end
+        -- Calculate house position based on FIXED plot_idx
+        local side = math.floor((self.plot_idx-1) / 4)
+        local pos_in_side = (self.plot_idx-1) % 4
+        local offset = 4 + (pos_in_side * 6)
+        local base
+        if side == 0 then base = {x=col.center.x+offset, y=col.center.y, z=col.center.z}
+        elseif side == 1 then base = {x=col.center.x-offset, y=col.center.y, z=col.center.z}
+        elseif side == 2 then base = {x=col.center.x, y=col.center.y, z=col.center.z+offset}
+        else base = {x=col.center.x, y=col.center.y, z=col.center.z-offset}
         end
         
-        if self.timer > 0.1 then
-            self.timer = 0
+        if self._timer < 0.15 then return end
+        self._timer = 0
+        
+        if self.schema_i <= #HOUSE_SCHEMA then
+            local item = HOUSE_SCHEMA[self.schema_i]
+            local p = {x=base.x+item.x, y=base.y+item.y, z=base.z+item.z}
             
-            if self.schema_idx <= #HOUSE_SCHEMA then
-                local item = HOUSE_SCHEMA[self.schema_idx]
-                
-                -- Simulate having materials (Creative mode for NPCs to prevent stuck state)
-                -- Or check inventory. For stability, we assume they have it if they are in this state.
-                local abs_pos = {
-                    x = self.house_pos.x + item.x,
-                    y = self.house_pos.y + item.y,
-                    z = self.house_pos.z + item.z
-                }
-                
-                local node = {name=item.name, param1=item.param1, param2=item.param2}
-                if item.meta then
-                    minetest.set_node(abs_pos, node)
-                    local meta = minetest.get_meta(abs_pos)
+            -- Consume material
+            local mat = item.name
+            if self.inventory[mat] and self.inventory[mat] > 0 then
+                self.inventory[mat] = self.inventory[mat] - 1
+                local node = {name=mat, param1=item.param1, param2=item.param2}
+                minetest.set_node(p, node)
+                if item.meta and item.meta.fields then
+                    local meta = minetest.get_meta(p)
                     for k,v in pairs(item.meta.fields) do meta:set_string(k,v) end
-                else
-                    minetest.set_node(abs_pos, node)
                 end
-                
-                self.schema_idx = self.schema_idx + 1
+                self.schema_i = self.schema_i + 1
             else
-                self.house_built = true
-                col.houses_built = col.houses_built + 1
-                self.state = "IDLE"
-                self.current_action = "House Done"
-                self.schema_idx = 1
+                -- Missing material! Go mine
+                self.state = "MOVE"
+                self.target = col.mine_pos
+                self.action = "Need "..mat
+                return
             end
+        else
+            self.house_built = true
+            col.houses_done = (col.houses_done or 0) + 1
+            self.state = "IDLE"
+            self.action = "House done"
+            self.schema_i = 1
         end
     end,
 
-    handle_build_wall = function(self, dtime, pos, col)
-        self.current_action = "Building Wall"
+    build_wall = function(self, col)
         self.object:set_velocity({x=0,y=0,z=0})
+        if not col.wall_bounds then col.wall_bounds = self:calc_wall_bounds(col) end
+        if self._timer < 0.08 then return end
+        self._timer = 0
         
-        if not col.wall_bounds then
-            local min_x, max_x, min_z, max_z = 9999, -9999, 9999, -9999
-            for _, m in ipairs(col.members) do
-                if m.house_pos then
-                    if m.house_pos.x < min_x then min_x = m.house_pos.x end
-                    if m.house_pos.x > max_x then max_x = m.house_pos.x end
-                    if m.house_pos.z < min_z then min_z = m.house_pos.z end
-                    if m.house_pos.z > max_z then max_z = m.house_pos.z end
-                end
+        local b = col.wall_bounds
+        local w = b.max_x - b.min_x
+        local d = b.max_z - b.min_z
+        local perimeter = 2 * (w + d)
+        local total = perimeter * 3  -- 3 layers
+        
+        if col.wall_idx < total then
+            local layer = math.floor(col.wall_idx / perimeter) + 1
+            local seg = col.wall_idx % perimeter
+            local p
+            if seg < w then
+                p = {x=b.min_x+seg, y=b.y+layer, z=b.min_z}
+            elseif seg < w+d then
+                p = {x=b.max_x, y=b.y+layer, z=b.min_z+(seg-w)}
+            elseif seg < 2*w+d then
+                p = {x=b.max_x-(seg-w-d), y=b.y+layer, z=b.max_z}
+            else
+                p = {x=b.min_x, y=b.y+layer, z=b.max_z-(seg-2*w-d)}
             end
-            col.wall_bounds = {
-                min_x = min_x - 4,
-                max_x = max_x + 4,
-                min_z = min_z - 4,
-                max_z = max_z + 4,
-                y = col.center.y
+            -- Gate: 2 blocks wide at front center, layer 1 only
+            local gate = (layer==1 and p.z==b.min_z and math.abs(p.x-(b.min_x+w/2))<1.5)
+            if not gate then minetest.set_node(p, {name="default:stone"}) end
+            col.wall_idx = col.wall_idx + 1
+        else
+            col.wall_done = true
+            col.state = "DEFEND"
+            self.state = "DEFEND"
+            self.action = "Defending"
+            col.wall_idx = 0
+        end
+    end,
+
+    defend = function(self, col)
+        if not col.wall_bounds then return end
+        local pos = self.object:get_pos()
+        local b = col.wall_bounds
+        
+        -- Patrol randomly inside bounds
+        if self._timer > 4 and (not self._patrol_target or vector.distance(pos, self._patrol_target) < 2) then
+            self._timer = 0
+            self._patrol_target = {
+                x = math.random(b.min_x, b.max_x),
+                y = b.y,
+                z = math.random(b.min_z, b.max_z)
             }
-            col.wall_progress = 0
+        end
+        if self._patrol_target then
+            local dir = vector.normalize(vector.subtract(self._patrol_target, pos))
+            self.object:set_velocity({x=dir.x*1.5, y=self.object:get_velocity().y, z=dir.z*1.5})
+            self.object:set_yaw(math.atan2(dir.z, dir.x) + math.pi/2)
         end
         
-        if self.timer > 0.05 then
-            self.timer = 0
-            
-            local b = col.wall_bounds
-            local p = col.wall_progress
-            
-            local width = b.max_x - b.min_x
-            local depth = b.max_z - b.min_z
-            local total = 2 * (width + depth) * 3
-            
-            if p < total then
-                local layer = math.floor(p / (2*(width+depth))) + 1
-                local rem = p % (2*(width+depth))
-                
-                local pos_to_build = nil
-                
-                if rem < width then
-                    pos_to_build = {x=b.min_x + rem, y=b.y + layer, z=b.min_z}
-                elseif rem < width + depth then
-                    pos_to_build = {x=b.max_x, y=b.y + layer, z=b.min_z + (rem-width)}
-                elseif rem < 2*width + depth then
-                    pos_to_build = {x=b.max_x - (rem-(width+depth)), y=b.y + layer, z=b.max_z}
-                else
-                    pos_to_build = {x=b.min_x, y=b.y + layer, z=b.max_z - (rem-(2*width+depth))}
-                end
-                
-                local is_entrance = false
-                if layer == 1 and math.abs(pos_to_build.x - (b.min_x + width/2)) < 1 and pos_to_build.z == b.min_z then
-                    is_entrance = true
-                end
-                
-                if not is_entrance then
-                    minetest.set_node(pos_to_build, {name="default:stone"})
-                end
-                
-                col.wall_progress = p + 1
-            else
-                col.wall_built = true
-                col.state = "DEFEND"
-                self.state = "DEFEND"
+        -- Attack intruders
+        for _, obj in ipairs(minetest.get_objects_inside_radius(pos, 4)) do
+            if obj:is_player() or (obj:get_luaentity() and obj:get_luaentity().type ~= "condomino:npc_entity") then
+                self.action = "Attacking!"
+                obj:punch(self.object, 1, {full_punch_interval=1, damage_groups={fleshy=4}}, nil)
+                local dir = vector.normalize(vector.subtract(obj:get_pos(), pos))
+                self.object:set_velocity({x=dir.x*3, y=0, z=dir.z*3})
+                return
             end
         end
     end,
 
-    handle_defend = function(self, dtime, pos, col)
-        self.current_action = "Patrolling"
-        
-        if col.wall_bounds then
-            local b = col.wall_bounds
-            if pos.x >= b.min_x and pos.x <= b.max_x and pos.z >= b.min_z and pos.z <= b.max_z then
-                local objects = minetest.get_objects_inside_radius(pos, 5)
-                for _, obj in ipairs(objects) do
-                    if obj:is_player() or (obj:get_luaentity() and obj:get_luaentity().type ~= "condomino:npc_entity") then
-                        self.current_action = "Attacking!"
-                        obj:punch(self.object, 1.0, {full_punch_interval=1.0, damage_groups={fleshy=5}}, nil)
-                        local dir = vector.normalize(vector.subtract(obj:get_pos(), pos))
-                        self.object:set_velocity({x=dir.x*3, y=0, z=dir.z*3})
-                        return
-                    end
-                end
+    calc_wall_bounds = function(self, col)
+        local minx, maxx, minz, maxz = 9999, -9999, 9999, -9999
+        for _, m in ipairs(col.members) do
+            if m.plot_idx then
+                local side = math.floor((m.plot_idx-1)/4)
+                local pos_in_side = (m.plot_idx-1)%4
+                local off = 4 + (pos_in_side*6)
+                if side==0 then minx = math.min(minx, col.center.x+off)
+                elseif side==1 then maxx = math.max(maxx, col.center.x-off)
+                elseif side==2 then minz = math.min(minz, col.center.z+off)
+                else maxz = math.max(maxz, col.center.z-off) end
             end
         end
-        
-        if self.timer > 5 then
-            self.timer = 0
-            if col.wall_bounds then
-                local rx = math.random(col.wall_bounds.min_x, col.wall_bounds.max_x)
-                local rz = math.random(col.wall_bounds.min_z, col.wall_bounds.max_z)
-                self.target_pos = {x=rx, y=col.center.y, z=rz}
-                self.state = "MOVING"
-            end
-        end
+        return {min_x=minx-3, max_x=maxx+3, min_z=minz-3, max_z=maxz+3, y=col.center.y}
     end,
 
     add_item = function(self, name)
@@ -493,60 +439,49 @@ minetest.register_entity("condomino:npc_entity", {
     end,
 })
 
--- --------------------------------------------------------------------------
--- Spawn Node
--- --------------------------------------------------------------------------
-
 minetest.register_node("condomino:npc", {
-    description = "NPC Spawner",
+    description = "Colony Spawner",
     tiles = {"wool_yellow.png"},
     groups = {cracky=3, oddly_breakable_by_hand=3},
-    
     on_place = function(itemstack, placer, pointed_thing)
         local pos = pointed_thing.above
-        if not pos then return itemstack end
+        if not pos or not minetest.get_node(pos).name:match("air") then return itemstack end
         
-        local node = minetest.get_node(pos)
-        if not minetest.registered_nodes[node.name] or not minetest.registered_nodes[node.name].buildable_to then
-            return itemstack
-        end
-        
-        local col_id = condomino.get_active_colony()
-        if not col_id then
-            col_id = condomino.create_colony(pos)
-        end
-        
-        local col = condomino.colonies[col_id]
-        
+        local cid = condomino.get_active_colony() or condomino.create_colony(pos)
+        local col = condomino.colonies[cid]
         if #col.members >= 10 then
-            minetest.chat_send_player(placer:get_player_name(), "Colony full.")
+            minetest.chat_send_player(placer:get_player_name(), "Colony full (10)")
             return itemstack
         end
         
         local name = condomino.get_unique_name()
         local role = (#col.members == 0) and "LEADER" or "FOLLOWER"
-        
-        local entity = minetest.add_entity(pos, "condomino:npc_entity")
-        if entity then
-            local luaent = entity:get_luaentity()
-            luaent.name = name
-            luaent.colony_id = col_id
-            luaent.role = role
-            luaent.inventory = {}
-            
+        local ent = minetest.add_entity(pos, "condomino:npc_entity")
+        if ent then
+            local lua = ent:get_luaentity()
+            lua.name = name
+            lua.colony_id = cid
+            lua.role = role
+            lua.inventory = {}
+            lua.action = "Spawning"
             if role == "LEADER" then
-                luaent.state = "BUILDING_PLAZA"
-                luaent.current_action = "Starting Plaza"
-                col.state = "PLAZA"
+                lua.state = "PLAZA"
+                lua.action = "Starting plaza"
             else
-                luaent.state = "MOVING"
-                luaent.target_pos = col.mine_pos
-                luaent.current_action = "Going to Mine"
+                lua.state = "MOVE"
+                lua.target = col.mine_pos
+                lua.action = "Going to mine"
             end
-            
             itemstack:take_item()
         end
-        
         return itemstack
-    end
+    end,
 })
+
+-- Helper: find active colony
+function condomino.get_active_colony()
+    for id, c in pairs(condomino.colonies) do
+        if c.state ~= "DEFEND" and #c.members < 10 then return id end
+    end
+    return nil
+end
