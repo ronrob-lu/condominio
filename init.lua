@@ -44,10 +44,7 @@ local function load_we_schema(filepath)
 	
 	if not content or content == "" then return nil end
 	
-	-- Strip WorldEdit version prefix (e.g., "5:" or "6:")
 	content = content:gsub("^%d+:", "")
-	
-	-- Minetest uses LuaJIT (Lua 5.1), which requires loadstring()
 	local fn, err = loadstring(content, "schema_" .. filepath)
 	if not fn then
 		clog("ERROR: Failed to compile .we file " .. filepath .. ": " .. tostring(err))
@@ -84,23 +81,18 @@ local function load_and_log(idx, filename)
 	end
 end
 
--- Load house 1 (tries standard_house1.we, falls back to standard_house.we)
 load_and_log(1, "standard_house1.we")
 if not condomino.house_schemas[1] then
 	load_and_log(1, "standard_house.we")
 end
--- Load houses 2-10
 for i = 2, 10 do
 	load_and_log(i, "standard_house" .. i .. ".we")
 end
 
--- ============================================================
 -- 📐 DYNAMIC HOUSE SLOT GENERATOR (Guarantees exactly 3-block gaps)
--- ============================================================
 local GAP = 3
 local max_x, max_z = 0, 0
 
--- Find largest footprint across all loaded schemas
 for _, schema in ipairs(condomino.house_schemas) do
 	for _, step in ipairs(schema) do
 		if step.x > max_x then max_x = step.x end
@@ -108,14 +100,12 @@ for _, schema in ipairs(condomino.house_schemas) do
 	end
 end
 
--- Fallback defaults if no schemas loaded yet
 if max_x == 0 then max_x = 6 end
 if max_z == 0 then max_z = 5 end
 
 local spacing_x = max_x + GAP
 local spacing_z = max_z + GAP
 
--- Generate 10 slots in a 4x3 grid, perfectly centered around (0,0)
 condomino.house_slots = {}
 local grid_layout = {
 	{col=0, row=0}, {col=1, row=0}, {col=2, row=0}, {col=3, row=0},
@@ -124,7 +114,6 @@ local grid_layout = {
 }
 
 for _, p in ipairs(grid_layout) do
-	-- Center offset: 4 cols → -1.5, 3 rows → -1.0
 	table.insert(condomino.house_slots, {
 		x = (p.col - 1.5) * spacing_x,
 		z = (p.row - 1.0) * spacing_z,
@@ -133,7 +122,6 @@ end
 
 clog(string.format("House grid auto-generated: X spacing=%d, Z spacing=%d (Gap between houses=%d)", spacing_x, spacing_z, GAP))
 
--- Pre-filled inventory every NPC spawns with (simulated; building always succeeds)
 condomino.start_inventory = {
 	["default:dirt"]       = 25,
 	["stairs:slab_glass"]  = 15,
@@ -141,7 +129,7 @@ condomino.start_inventory = {
 	["beds:bed_top"]       = 1,
 	["beds:bed_bottom"]    = 1,
 	["default:torch_wall"] = 2,
-	["default:stone"]      = 200,  -- leader uses this for plaza + wall
+	["default:stone"]      = 200,
 }
 
 -- ============================================================
@@ -164,7 +152,6 @@ end
 
 load_colonies()
 
--- Find a non-DONE colony within 80 nodes
 local function find_colony(pos)
 	for i, col in ipairs(condomino.colonies) do
 		if col.phase ~= "DONE" and vector.distance(pos, col.center) < 80 then
@@ -174,7 +161,6 @@ local function find_colony(pos)
 	return nil, nil
 end
 
--- Create brand-new colony; colony starts in PLAZA phase immediately
 local function new_colony(pos)
 	local col = {
 		center       = vector.round(pos),
@@ -195,6 +181,8 @@ end
 minetest.register_entity("condomino:npc_entity", {
 
 	initial_properties = {
+		hp = 20,
+		hp_max = 20,
 		visual          = "mesh",
 		mesh            = "character.b3d",
 		textures        = {"character.png"},
@@ -236,11 +224,14 @@ minetest.register_entity("condomino:npc_entity", {
 		self.plaza_ix   = data.plaza_ix   or -24
 		self.plaza_iz   = data.plaza_iz   or -24
 
+		-- Runtime fields
 		self.timer      = 0
 		self.anim_timer = 0
 		self.patrol_pos = nil
 		self.stuck_timer = 0
 		self.last_pos   = nil
+		self.env_damage_timer = 0  -- ⚡ NEW: Environmental damage cooldown
+		self.breath     = 15       -- ⚡ NEW: 15s breath underwater
 
 		self.object:set_properties({
 			nametag       = self.npc_name,
@@ -249,6 +240,15 @@ minetest.register_entity("condomino:npc_entity", {
 		})
 
 		self.object:set_acceleration({x = 0, y = -9.8, z = 0})
+	end,
+
+	on_punch = function(self, puncher, time_from_last_punch, tool_capabilities, dir, damage)
+		if not self.object then return end
+		-- Check death after engine applies damage
+		if self.object:get_hp() <= 0 then
+			clog(self.npc_name .. " has died!")
+			self.object:remove()
+		end
 	end,
 
 	move_toward = function(self, target, dtime, tol)
@@ -423,7 +423,6 @@ minetest.register_entity("condomino:npc_entity", {
 			return
 		end
 
-		-- ✅ DYNAMIC SCHEMA SELECTION
 		local schema = condomino.house_schemas[self.house_idx]
 		if not schema then
 			clog("ERROR: No schema loaded for house_idx " .. tostring(self.house_idx))
@@ -576,6 +575,37 @@ minetest.register_entity("condomino:npc_entity", {
 		if self.timer < 0.1 then return end
 		local dt = self.timer
 		self.timer = 0
+
+		-- ⚡ ENVIRONMENTAL DAMAGE (Lava & Drowning)
+		self.env_damage_timer = (self.env_damage_timer or 0) + dt
+		if self.env_damage_timer >= 1.0 then
+			self.env_damage_timer = 0
+			local pos = self.object:get_pos()
+			if pos then
+				local node = minetest.get_node(pos)
+				local ndef = minetest.registered_nodes[node.name]
+				if ndef then
+					if ndef.groups and ndef.groups.lava then
+						-- 4 damage/sec in lava
+						self.object:punch(self.object, 1, {
+							full_punch_interval = 1.0,
+							damage_groups = {fleshy = 4}
+						})
+					elseif ndef.groups and ndef.groups.liquid then
+						-- Drowning: 15s breath, then 2 damage/sec
+						self.breath = (self.breath or 15) - 1
+						if self.breath <= 0 then
+							self.object:punch(self.object, 1, {
+								full_punch_interval = 1.0,
+								damage_groups = {fleshy = 2}
+							})
+						end
+					else
+						self.breath = 15 -- Reset breath on land
+					end
+				end
+			end
+		end
 
 		local col = condomino.colonies[self.colony_idx]
 		if not col then
